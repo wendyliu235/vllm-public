@@ -1,0 +1,119 @@
+name: Update XPU nightly wheel test branch
+
+on:
+  schedule:
+    - cron: "15 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-xpu-nightly-wheel
+  cancel-in-progress: false
+
+jobs:
+  update-test-branch:
+    runs-on: ubuntu-latest
+    env:
+      TEST_BRANCH: wenjun/test-upstream-xpu-whl
+    steps:
+      - name: Require push token
+        env:
+          PUSH_TOKEN: ${{ secrets.XPU_NIGHTLY_SYNC_TOKEN }}
+        run: test -n "$PUSH_TOKEN" || (echo "Set XPU_NIGHTLY_SYNC_TOKEN" >&2; exit 1)
+
+      - name: Checkout fork default branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.XPU_NIGHTLY_SYNC_TOKEN }}
+
+      - name: Find current XPU nightly wheel source commit
+        id: wheel
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          from html.parser import HTMLParser
+          from urllib.parse import unquote, urljoin, urlsplit
+          from urllib.request import urlopen
+
+          index = "https://wheels.vllm.ai/nightly/xpu/vllm/"
+
+          class Links(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.hrefs = []
+
+              def handle_starttag(self, tag, attrs):
+                  href = dict(attrs).get("href", "")
+                  if tag == "a" and href.endswith(".whl"):
+                      self.hrefs.append(href)
+
+          parser = Links()
+          with urlopen(index, timeout=30) as response:
+              parser.feed(response.read().decode("utf-8"))
+
+          candidates = []
+          for href in parser.hrefs:
+              wheel_url = urljoin(index, href)
+              wheel = unquote(urlsplit(wheel_url).path.rsplit("/", 1)[-1])
+              if "xpu-" not in wheel or "x86_64" not in wheel:
+                  continue
+              match = re.search(r"/([0-9a-f]{40})/[^/]+\.whl$", urlsplit(wheel_url).path)
+              if match:
+                  candidates.append((match.group(1), wheel))
+
+          commits = {commit for commit, _ in candidates}
+          if len(commits) != 1:
+              raise SystemExit(f"Expected one nightly source commit, found: {sorted(commits)}")
+
+          commit = commits.pop()
+          wheel = next(wheel for candidate, wheel in candidates if candidate == commit)
+          print(f"commit={commit}")
+          print(f"wheel={wheel}")
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: Rebase test changes onto wheel source and push
+        env:
+          WHEEL_COMMIT: ${{ steps.wheel.outputs.commit }}
+          WHEEL_FILE: ${{ steps.wheel.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags origin "refs/heads/${TEST_BRANCH}:refs/remotes/origin/${TEST_BRANCH}"
+          git fetch --no-tags upstream main
+
+          if ! git cat-file -e "${WHEEL_COMMIT}^{commit}" 2>/dev/null; then
+            git fetch --no-tags upstream "$WHEEL_COMMIT"
+          fi
+          git cat-file -e "${WHEEL_COMMIT}^{commit}"
+
+          old_head="$(git rev-parse "origin/${TEST_BRANCH}")"
+          old_base="$(git merge-base "origin/${TEST_BRANCH}" upstream/main)"
+          if [[ -z "$old_base" ]]; then
+            echo "Could not find the test branch's upstream base" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$old_base" "$WHEEL_COMMIT"; then
+            echo "Nightly wheel commit is not a descendant of the current test base" >&2
+            exit 1
+          fi
+
+          echo "Testing wheel: $WHEEL_FILE"
+          echo "Rebasing PR commits from $old_base onto $WHEEL_COMMIT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --detach "origin/${TEST_BRANCH}"
+          git switch -c nightly-wheel-update
+          git rebase --onto "$WHEEL_COMMIT" "$old_base"
+
+          new_head="$(git rev-parse HEAD)"
+          if [[ "$new_head" == "$old_head" ]]; then
+            echo "Test branch already targets this nightly source commit; no push needed"
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
+            "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
