@@ -152,7 +152,9 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import sys
           from datetime import datetime
+          from urllib.error import HTTPError
           from urllib.request import Request, urlopen
           from zoneinfo import ZoneInfo
 
@@ -177,8 +179,15 @@ jobs:
               },
               method="POST",
           )
-          with urlopen(request, timeout=60) as response:
-              build = json.load(response)
+          try:
+              with urlopen(request, timeout=60) as response:
+                  build = json.load(response)
+          except HTTPError as error:
+              body = error.read().decode("utf-8", errors="replace")
+              body = body.replace(os.environ["BUILDKITE_TOKEN"], "[REDACTED]")
+              print(f"Buildkite build creation failed: HTTP {error.code}", file=sys.stderr)
+              print(f"Response body: {body}", file=sys.stderr)
+              sys.exit(1)
           build_url = build["web_url"]
           print(f"Full Intel CI: {build_url}")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
