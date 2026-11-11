@@ -152,12 +152,15 @@ jobs:
           python - <<'PY'
           import json
           import os
+          from datetime import datetime
           from urllib.request import Request, urlopen
+          from zoneinfo import ZoneInfo
 
+          validation_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y.%m.%d")
           payload = {
               "commit": os.environ["TEST_COMMIT"],
               "branch": f"wendyliu235:{os.environ['TEST_BRANCH']}",
-              "message": f"PR #59353 full XPU nightly test: {os.environ['WHEEL_FILE']}",
+              "message": f"Nightly-vllm whl validation {validation_date}\n\nPR #59353\nWheel: {os.environ['WHEEL_FILE']}",
               "pull_request_id": 59353,
               "pull_request_base_branch": "main",
               "pull_request_repository": "https://github.com/wendyliu235/vllm-public.git",
