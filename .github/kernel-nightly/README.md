@@ -7,8 +7,10 @@ Enable GitHub Actions and this scheduled workflow in the fork if disabled.
 
 The workflow uses a GitHub-hosted Ubuntu runner and the repository's
 `GITHUB_TOKEN` with `contents: write`. Repository rules must permit it to
-update `intel-kernel-nightly-test`, including force pushes. No personal token,
-XPU runner, image build, Intel CI trigger, or upstream PR is required.
+update `intel-kernel-nightly-test`, including force pushes. No personal token
+or XPU runner is required for synchronization. Configure the repository secret
+`BUILDKITE_TOKEN` with permission to create builds (`write_builds`) in
+`vllm/intel-ci`.
 
 Each run fetches `vllm-project/vllm:main`, applies
 [`integration.patch`](integration.patch), checks shell syntax, and pushes the
@@ -16,6 +18,11 @@ result to `intel-kernel-nightly-test` using an explicit `--force-with-lease`.
 The test branch consists of upstream plus one integration commit; old test
 history is not merged or rebased back in. Unchanged source and patches produce
 no push. A patch conflict or failed check stops the run before pushing.
+After successful synchronization, each scheduled or manual run creates one
+full Intel CI build via the Buildkite API, even when no push was needed:
+a new kernel nightly wheel may exist without an upstream source change.
+Failed synchronization prevents the trigger. The POST is not automatically
+retried, to avoid duplicate builds after an ambiguous response.
 
 The test branch contains only the two Intel CI script changes in the patch.
 It builds vLLM from upstream source, not a published vLLM wheel. The kernel
@@ -24,9 +31,9 @@ The existing vLLM nightly wheel sync workflow is independent and unchanged.
 
 ## Running Intel CI
 
-Manually configure Intel CI to fetch this fork's `intel-kernel-nightly-test`
-branch and use the new commit. Set these at pipeline level, including in
-generated image-build and test jobs:
+The API request uses the exact synchronized commit, fork branch
+`wendyliu235:intel-kernel-nightly-test`, and PR #66995 metadata, following
+the existing vLLM nightly wheel workflow. It sets:
 
 ```yaml
 env:
@@ -34,6 +41,13 @@ env:
   RUN_ALL: "1"
   NIGHTLY: "1"
 ```
+
+The created Buildkite URL and commit are recorded in the Actions job summary.
+No tests execute on the GitHub-hosted runner.
+This workflow does not disable PR-driven Intel CI triggers; those must be
+disabled separately to avoid a second build after branch updates. Closing
+PR #66995 may suppress PR-driven builds, but compatibility with the pipeline's
+PR checks must be verified before relying on closed-PR API builds.
 
 By default the image build selects the latest compatible development wheel
 from the public kernel nightly index. To reproduce a specific version, also set

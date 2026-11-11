@@ -20,6 +20,15 @@ jobs:
     env:
       TEST_BRANCH: intel-kernel-nightly-test
     steps:
+      - name: Require Buildkite token
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+        run: |
+          test -n "$BUILDKITE_TOKEN" || {
+            echo "Set BUILDKITE_TOKEN with write_builds permission" >&2
+            exit 1
+          }
+
       - name: Checkout fork default branch
         uses: actions/checkout@v4
         with:
@@ -27,6 +36,7 @@ jobs:
           fetch-depth: 0
 
       - name: Rebuild kernel nightly test branch and push
+        id: update
         shell: bash
         run: |
           set -euo pipefail
@@ -39,6 +49,7 @@ jobs:
           git fetch --no-tags origin \
             "refs/heads/${TEST_BRANCH}:refs/remotes/origin/${TEST_BRANCH}"
           old_head="$(git rev-parse "origin/${TEST_BRANCH}")"
+          echo "commit=$old_head" >> "$GITHUB_OUTPUT"
           upstream_head="$(git rev-parse upstream/main)"
 
           git config user.name "github-actions[bot]"
@@ -62,6 +73,7 @@ jobs:
             -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
           git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
             "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
           {
             echo "### XPU kernel nightly branch updated"
@@ -69,5 +81,49 @@ jobs:
             echo "- Upstream: \`${upstream_head}\`"
             echo "- Test commit: \`$(git rev-parse HEAD)\`"
             echo "- Latest kernel nightly wheel is selected when Intel CI builds."
-            echo "- No builds or tests were triggered by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger full Intel CI
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          TEST_COMMIT: ${{ steps.update.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation_date="$(TZ=Asia/Shanghai date +%Y.%m.%d)"
+          payload="$(jq -n \
+            --arg commit "$TEST_COMMIT" \
+            --arg branch "wendyliu235:${TEST_BRANCH}" \
+            --arg message "Nightly-kernel whl validation ${validation_date}
+
+          PR #66995" \
+            '{
+              commit: $commit,
+              branch: $branch,
+              message: $message,
+              pull_request_id: 66995,
+              pull_request_base_branch: "main",
+              pull_request_repository: "https://github.com/wendyliu235/vllm-public.git",
+              pull_request_labels: ["ci/build", "intel-gpu"],
+              ignore_pipeline_branch_filters: true,
+              env: {
+                NIGHTLY: "1",
+                RUN_ALL: "1",
+                VLLM_XPU_KERNEL_NIGHTLY: "1"
+              }
+            }')"
+          response="$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 30 --max-time 120 \
+            --request POST \
+            --header "Authorization: Bearer ${BUILDKITE_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            https://api.buildkite.com/v2/organizations/vllm/pipelines/intel-ci/builds)"
+          build_url="$(jq -er '.web_url | strings | select(length > 0)' <<< "$response")"
+          echo "Full Intel CI: $build_url"
+          {
+            echo "### Kernel nightly full Intel CI"
+            echo "[Build](${build_url})"
+            echo "Commit: \`${TEST_COMMIT}\`"
+            echo "PR #66995; NIGHTLY=1, RUN_ALL=1, VLLM_XPU_KERNEL_NIGHTLY=1"
           } >> "$GITHUB_STEP_SUMMARY"
