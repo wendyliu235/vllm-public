@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "15 9 * * *"
   workflow_dispatch:
+    inputs:
+      run_full_ci:
+        description: Run full Intel CI even if the nightly source is unchanged
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -21,7 +26,10 @@ jobs:
       - name: Require push token
         env:
           PUSH_TOKEN: ${{ secrets.XPU_NIGHTLY_SYNC_TOKEN }}
-        run: test -n "$PUSH_TOKEN" || (echo "Set XPU_NIGHTLY_SYNC_TOKEN" >&2; exit 1)
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+        run: |
+          test -n "$PUSH_TOKEN" || (echo "Set XPU_NIGHTLY_SYNC_TOKEN" >&2; exit 1)
+          test -n "$BUILDKITE_TOKEN" || (echo "Set BUILDKITE_TOKEN with write_builds permission" >&2; exit 1)
 
       - name: Checkout fork default branch
         uses: actions/checkout@v4
@@ -77,6 +85,7 @@ jobs:
           cat "$GITHUB_OUTPUT"
 
       - name: Rebase test changes onto wheel source and push
+        id: update
         env:
           WHEEL_COMMIT: ${{ steps.wheel.outputs.commit }}
           WHEEL_FILE: ${{ steps.wheel.outputs.wheel }}
@@ -92,6 +101,7 @@ jobs:
           git cat-file -e "${WHEEL_COMMIT}^{commit}"
 
           old_head="$(git rev-parse "origin/${TEST_BRANCH}")"
+          echo "commit=$old_head" >> "$GITHUB_OUTPUT"
           old_base="$(git merge-base "origin/${TEST_BRANCH}" upstream/main)"
           if [[ -z "$old_base" ]]; then
             echo "Could not find the test branch's upstream base" >&2
@@ -129,3 +139,46 @@ jobs:
             -m "Source commit: ${WHEEL_COMMIT}"
           git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
             "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger full Intel CI
+        if: steps.update.outputs.updated == 'true' || inputs.run_full_ci == true
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          TEST_COMMIT: ${{ steps.update.outputs.commit }}
+          WHEEL_FILE: ${{ steps.wheel.outputs.wheel }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.request import Request, urlopen
+
+          payload = {
+              "commit": os.environ["TEST_COMMIT"],
+              "branch": f"wendyliu235:{os.environ['TEST_BRANCH']}",
+              "message": f"PR #59353 full XPU nightly test: {os.environ['WHEEL_FILE']}",
+              "pull_request_id": 59353,
+              "pull_request_base_branch": "main",
+              "pull_request_repository": "https://github.com/wendyliu235/vllm-public.git",
+              "pull_request_labels": ["ci/build", "intel-gpu"],
+              "ignore_pipeline_branch_filters": True,
+              "env": {"NIGHTLY": "1", "RUN_ALL": "1"},
+          }
+          request = Request(
+              "https://api.buildkite.com/v2/organizations/vllm/pipelines/intel-ci/builds",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {os.environ['BUILDKITE_TOKEN']}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urlopen(request, timeout=60) as response:
+              build = json.load(response)
+          build_url = build["web_url"]
+          print(f"Full Intel CI: {build_url}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"### Full Intel CI\n[Build]({build_url})\n\n")
+              summary.write(f"Commit: `{payload['commit']}`\n\nNIGHTLY=1, RUN_ALL=1\n")
+          PY
