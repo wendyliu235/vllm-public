@@ -97,6 +97,10 @@ jobs:
             echo "Could not find the test branch's upstream base" >&2
             exit 1
           fi
+          if [[ "$old_base" == "$WHEEL_COMMIT" ]]; then
+            echo "Nightly source commit has not changed; no update needed"
+            exit 0
+          fi
           if ! git merge-base --is-ancestor "$old_base" "$WHEEL_COMMIT"; then
             echo "Nightly wheel commit is not a descendant of the current test base" >&2
             exit 1
@@ -115,5 +119,13 @@ jobs:
             echo "Test branch already targets this nightly source commit; no push needed"
             exit 0
           fi
+          update_date="$(TZ=Asia/Shanghai date +%Y.%m.%d)"
+          wheel_version="${WHEEL_FILE#vllm-}"
+          wheel_version="${wheel_version%%-cp*}"
+          git commit --allow-empty \
+            -m "${update_date} update XPU nightly: ${wheel_version}" \
+            -m "Wheel: ${WHEEL_FILE}" \
+            -m "Wheel URL: https://wheels.vllm.ai/${WHEEL_COMMIT}/${WHEEL_FILE}" \
+            -m "Source commit: ${WHEEL_COMMIT}"
           git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
             "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
