@@ -1,0 +1,73 @@
+name: Update XPU kernel nightly test branch
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-xpu-kernel-nightly
+  cancel-in-progress: false
+
+jobs:
+  update-test-branch:
+    if: github.repository == 'wendyliu235/vllm-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TEST_BRANCH: intel-kernel-nightly-test
+    steps:
+      - name: Checkout fork default branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Rebuild kernel nightly test branch and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_file="$(mktemp "$RUNNER_TEMP/kernel-nightly.XXXXXX.patch")"
+          trap 'rm -f "$patch_file"' EXIT
+          cp .github/kernel-nightly/integration.patch "$patch_file"
+
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin \
+            "refs/heads/${TEST_BRANCH}:refs/remotes/origin/${TEST_BRANCH}"
+          old_head="$(git rev-parse "origin/${TEST_BRANCH}")"
+          upstream_head="$(git rev-parse upstream/main)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --detach "$upstream_head"
+          git apply --3way --index "$patch_file"
+          git diff --cached --check
+          bash -n .buildkite/image_build/image_build_xpu.sh \
+            .buildkite/scripts/hardware_ci/run-intel-test.sh
+
+          if [[ "$(git write-tree)" == "$(git rev-parse "${old_head}^{tree}")" ]] &&
+              git merge-base --is-ancestor "$upstream_head" "$old_head"; then
+            echo "Upstream and kernel overlay are unchanged; no push needed"
+            exit 0
+          fi
+
+          update_date="$(TZ=Asia/Shanghai date +%Y.%m.%d)"
+          git commit -s \
+            -m "${update_date} sync upstream for XPU kernel nightly" \
+            -m "Upstream: ${upstream_head}" \
+            -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+          git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
+            "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
+
+          {
+            echo "### XPU kernel nightly branch updated"
+            echo "- Branch: \`${TEST_BRANCH}\`"
+            echo "- Upstream: \`${upstream_head}\`"
+            echo "- Test commit: \`$(git rev-parse HEAD)\`"
+            echo "- Latest kernel nightly wheel is selected when Intel CI builds."
+            echo "- No builds or tests were triggered by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
