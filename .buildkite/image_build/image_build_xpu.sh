@@ -18,6 +18,7 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 # skip build if image already exists
 if docker manifest inspect "$IMAGE" &> /dev/null; then
   echo "Image found"
+  docker pull "$IMAGE"
 else
   echo "Image not found, proceeding with build..."
   # build
@@ -29,6 +30,20 @@ else
     --progress plain .
   # push
   docker push "$IMAGE"
+fi
+
+VLLM_VERSION=$(docker run --rm --entrypoint /opt/venv/bin/python "$IMAGE" \
+  -c 'import importlib.metadata; print(importlib.metadata.version("vllm"))')
+WHEEL_COMMIT=$(python3 -c 'import re, sys; match = re.search(r"\+g([0-9a-f]{7,40})", sys.argv[1]); print(match.group(1) if match else "")' "$VLLM_VERSION")
+if [[ -z "$WHEEL_COMMIT" ]]; then
+  echo "Could not identify the source commit in installed vLLM version: $VLLM_VERSION" >&2
+  exit 1
+fi
+
+if command -v buildkite-agent >/dev/null 2>&1; then
+  printf '### Installed XPU vLLM wheel\n\n- **Version:** `%s`\n- **Wheel source commit:** [`%s`](https://github.com/vllm-project/vllm/commit/%s)\n- **Image:** `%s`\n' \
+    "$VLLM_VERSION" "$WHEEL_COMMIT" "$WHEEL_COMMIT" "$IMAGE" \
+    | buildkite-agent annotate --append --style info --context xpu-installed-wheel
 fi
 
 .buildkite/scripts/annotate-image-build.sh "$IMAGE"
