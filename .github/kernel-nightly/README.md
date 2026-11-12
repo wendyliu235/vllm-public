@@ -24,7 +24,7 @@ a new kernel nightly wheel may exist without an upstream source change.
 Failed synchronization prevents the trigger. The POST is not automatically
 retried, to avoid duplicate builds after an ambiguous response.
 
-The test branch contains only the two Intel CI script changes in the patch.
+The test branch contains the Intel CI script and XPU Dockerfile changes in the patch.
 It builds vLLM from upstream source, not a published vLLM wheel. The kernel
 nightly wheel is selected at Intel CI build time, not during branch sync.
 The existing vLLM nightly wheel sync workflow is independent and unchanged.
@@ -54,8 +54,10 @@ from the public kernel nightly index. To reproduce a specific version, also set
 `VLLM_XPU_KERNEL_VERSION`, for example `0.1.18.dev20261109`.
 The image build records the exact wheel URL, version, SHA256, and image tag in
 `build/xpu-kernel-wheel/kernel-wheel-info.txt` and Buildkite annotations.
-The kernel pin is restored after building; the selected image must pass the
-kernel version and extension import checks before publication.
+The kernel pin is supplied through a temporary BuildKit context, leaving the
+tracked requirements file unchanged. This avoids introducing a dirty SCM
+version that differs from the Rust frontend version. The selected image must
+pass the kernel version and extension import checks before publication.
 
 ## Maintaining the overlay
 
@@ -70,6 +72,7 @@ To refresh the patch from a reviewed integration branch:
 git diff --full-index upstream/main...reviewed-kernel-branch -- \
   .buildkite/image_build/image_build_xpu.sh \
   .buildkite/scripts/hardware_ci/run-intel-test.sh \
+  docker/Dockerfile.xpu \
   > .github/kernel-nightly/integration.patch
 ```
 
