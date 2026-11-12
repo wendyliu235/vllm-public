@@ -41,9 +41,11 @@ if [[ -z "$WHEEL_COMMIT" ]]; then
 fi
 
 if command -v buildkite-agent >/dev/null 2>&1; then
-  printf '### Installed XPU vLLM wheel\n\n- **Version:** `%s`\n- **Wheel source commit:** [`%s`](https://github.com/vllm-project/vllm/commit/%s)\n- **Image:** `%s`\n' \
+  if ! printf '### Installed XPU vLLM wheel\n\n- **Version:** `%s`\n- **Wheel source commit:** [`%s`](https://github.com/vllm-project/vllm/commit/%s)\n- **Image:** `%s`\n' \
     "$VLLM_VERSION" "$WHEEL_COMMIT" "$WHEEL_COMMIT" "$IMAGE" \
-    | buildkite-agent annotate --append --style info --context xpu-installed-wheel
+    | buildkite-agent annotate --append --style info --context xpu-installed-wheel; then
+    echo "warning: failed to annotate the installed XPU vLLM wheel"
+  fi
 fi
 
 .buildkite/scripts/annotate-image-build.sh "$IMAGE"
