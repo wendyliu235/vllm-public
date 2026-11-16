@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TEST_BRANCH: intel-kernel-nightly-test
+      TEST_BRANCH: intel-kernel-nightly
     steps:
       - name: Require Buildkite token
         env:
@@ -96,12 +96,12 @@ jobs:
             --arg branch "wendyliu235:${TEST_BRANCH}" \
             --arg message "Nightly-kernel whl validation ${validation_date}
 
-          PR #66995" \
+          PR #67822" \
             '{
               commit: $commit,
               branch: $branch,
               message: $message,
-              pull_request_id: 66995,
+              pull_request_id: 67822,
               pull_request_base_branch: "main",
               pull_request_repository: "https://github.com/wendyliu235/vllm-public.git",
               pull_request_labels: ["ci/build", "intel-gpu"],
@@ -125,5 +125,5 @@ jobs:
             echo "### Kernel nightly full Intel CI"
             echo "[Build](${build_url})"
             echo "Commit: \`${TEST_COMMIT}\`"
-            echo "PR #66995; NIGHTLY=1, RUN_ALL=1, VLLM_XPU_KERNEL_NIGHTLY=1"
+            echo "PR #67822; NIGHTLY=1, RUN_ALL=1, VLLM_XPU_KERNEL_NIGHTLY=1"
           } >> "$GITHUB_STEP_SUMMARY"

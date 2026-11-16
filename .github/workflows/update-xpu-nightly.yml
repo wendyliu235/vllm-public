@@ -162,8 +162,8 @@ jobs:
           payload = {
               "commit": os.environ["TEST_COMMIT"],
               "branch": f"wendyliu235:{os.environ['TEST_BRANCH']}",
-              "message": f"Nightly-vllm whl validation {validation_date}\n\nPR #59353\nWheel: {os.environ['WHEEL_FILE']}",
-              "pull_request_id": 59353,
+              "message": f"Nightly-vllm whl validation {validation_date}\n\nPR #67823\nWheel: {os.environ['WHEEL_FILE']}",
+              "pull_request_id": 67823,
               "pull_request_base_branch": "main",
               "pull_request_repository": "https://github.com/wendyliu235/vllm-public.git",
               "pull_request_labels": ["ci/build", "intel-gpu"],
