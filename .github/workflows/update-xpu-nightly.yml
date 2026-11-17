@@ -5,6 +5,10 @@ on:
     - cron: "0 8 * * *"
   workflow_dispatch:
     inputs:
+      release_version:
+        description: Optional vLLM release version, for example 0.34.0; blank uses nightly
+        type: string
+        required: false
       run_full_ci:
         description: Run full Intel CI even if the nightly source is unchanged
         type: boolean
@@ -38,16 +42,22 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.XPU_NIGHTLY_SYNC_TOKEN }}
 
-      - name: Find current XPU nightly wheel source commit
+      - name: Find XPU wheel and source commit
         id: wheel
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
           import re
           from html.parser import HTMLParser
           from urllib.parse import unquote, urljoin, urlsplit
           from urllib.request import urlopen
 
-          index = "https://wheels.vllm.ai/nightly/xpu/vllm/"
+          release = os.environ.get("RELEASE_VERSION", "").strip()
+          if release and not re.fullmatch(r"\d+\.\d+\.\d+", release):
+              raise SystemExit("Release version must be in the form X.Y.Z")
+          index = f"https://wheels.vllm.ai/{release or 'nightly'}/xpu/vllm/"
 
           class Links(HTMLParser):
               def __init__(self):
@@ -69,18 +79,16 @@ jobs:
               wheel = unquote(urlsplit(wheel_url).path.rsplit("/", 1)[-1])
               if "xpu-" not in wheel or "x86_64" not in wheel:
                   continue
+              version = wheel.split("-", 2)[1]
+              if release and version != f"{release}+xpu":
+                  continue
               match = re.search(r"/([0-9a-f]{40})/[^/]+\.whl$", urlsplit(wheel_url).path)
               if match:
-                  candidates.append((match.group(1), wheel))
-
-          commits = {commit for commit, _ in candidates}
-          if len(commits) != 1:
-              raise SystemExit(f"Expected one nightly source commit, found: {sorted(commits)}")
-
-          commit = commits.pop()
-          wheel = next(wheel for candidate, wheel in candidates if candidate == commit)
-          print(f"commit={commit}")
-          print(f"wheel={wheel}")
+                  candidates.append((match.group(1), wheel, wheel_url, version))
+          if len(candidates) != 1:
+              raise SystemExit(f"Expected one matching XPU wheel, found {len(candidates)}")
+          commit, wheel, wheel_url, version = candidates[0]
+          print(f"commit={commit}\nwheel={wheel}\nurl={wheel_url}\nversion={version}\nrelease={release}")
           PY
           cat "$GITHUB_OUTPUT"
 
@@ -89,6 +97,9 @@ jobs:
         env:
           WHEEL_COMMIT: ${{ steps.wheel.outputs.commit }}
           WHEEL_FILE: ${{ steps.wheel.outputs.wheel }}
+          WHEEL_URL: ${{ steps.wheel.outputs.url }}
+          WHEEL_VERSION: ${{ steps.wheel.outputs.version }}
+          RELEASE_VERSION: ${{ steps.wheel.outputs.release }}
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/vllm-project/vllm.git
@@ -99,55 +110,85 @@ jobs:
             git fetch --no-tags upstream "$WHEEL_COMMIT"
           fi
           git cat-file -e "${WHEEL_COMMIT}^{commit}"
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            git fetch --no-tags upstream "refs/heads/releases/v${RELEASE_VERSION}:refs/remotes/upstream/releases/v${RELEASE_VERSION}"
+            git merge-base --is-ancestor "$WHEEL_COMMIT" "upstream/releases/v${RELEASE_VERSION}" || {
+              echo "Wheel source is not on the requested release branch" >&2
+              exit 1
+            }
+          fi
 
           old_head="$(git rev-parse "origin/${TEST_BRANCH}")"
           echo "commit=$old_head" >> "$GITHUB_OUTPUT"
-          old_base="$(git merge-base "origin/${TEST_BRANCH}" upstream/main)"
-          if [[ -z "$old_base" ]]; then
-            echo "Could not find the test branch's upstream base" >&2
+          git grep -q 'ARG VLLM_WHEEL_URL' "$old_head" -- docker/Dockerfile.xpu || {
+            echo "PR branch does not support pinning a wheel URL" >&2
             exit 1
+          }
+          git grep -q 'VLLM_WHEEL_VERSION' "$old_head" -- .buildkite/image_build/image_build_xpu.sh || {
+            echo "PR branch does not verify the installed wheel version" >&2
+            exit 1
+          }
+          old_wheel="$(git log -1 --format=%B --grep='^Source commit: ' "$old_head" | sed -n 's/^Wheel: //p' | head -n 1)"
+          old_base="$(git log -1 --format=%B --grep='^Source commit: ' "$old_head" | sed -n 's/^Source commit: \([0-9a-f]\{40\}\)$/\1/p' | head -n 1)"
+          if [[ -z "$old_base" ]]; then
+            old_base="$(git merge-base "$old_head" upstream/main)"
           fi
-          if [[ "$old_base" == "$WHEEL_COMMIT" ]]; then
-            echo "Nightly source commit has not changed; no update needed"
+          git merge-base --is-ancestor "$old_base" "$old_head"
+          if [[ "$old_base" == "$WHEEL_COMMIT" && "$old_wheel" == "$WHEEL_FILE" ]]; then
+            echo "Selected wheel and source commit have not changed; no update needed"
             exit 0
           fi
-          if ! git merge-base --is-ancestor "$old_base" "$WHEEL_COMMIT"; then
-            echo "Nightly wheel commit is not a descendant of the current test base" >&2
-            exit 1
-          fi
-
           echo "Testing wheel: $WHEEL_FILE"
-          echo "Rebasing PR commits from $old_base onto $WHEEL_COMMIT"
+          echo "Applying test changes from $old_base onto $WHEEL_COMMIT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --detach "origin/${TEST_BRANCH}"
-          git switch -c nightly-wheel-update
-          git rebase --onto "$WHEEL_COMMIT" "$old_base"
-
-          new_head="$(git rev-parse HEAD)"
-          if [[ "$new_head" == "$old_head" ]]; then
-            echo "Test branch already targets this nightly source commit; no push needed"
-            exit 0
-          fi
+          patch_file="$(mktemp "$RUNNER_TEMP/vllm-wheel-overlay.XXXXXX")"
+          trap 'rm -f "$patch_file"' EXIT
+          git diff --binary "$old_base" "$old_head" -- docker/Dockerfile.xpu .buildkite/image_build/image_build_xpu.sh > "$patch_file"
+          git diff --name-only "$old_base" "$old_head" | while IFS= read -r changed_file; do
+            case "$changed_file" in
+              docker/Dockerfile.xpu|.buildkite/image_build/image_build_xpu.sh) ;;
+              *) echo "Unexpected PR change: $changed_file" >&2; exit 1 ;;
+            esac
+          done
+          git switch --detach "$WHEEL_COMMIT"
+          git apply --3way --index "$patch_file"
+          git diff --cached --check
+          bash -n .buildkite/image_build/image_build_xpu.sh
+          git grep -q 'ARG VLLM_WHEEL_URL' -- docker/Dockerfile.xpu
+          git grep -q 'VLLM_WHEEL_VERSION' -- .buildkite/image_build/image_build_xpu.sh
           update_date="$(TZ=Asia/Shanghai date +%Y.%m.%d)"
-          wheel_version="${WHEEL_FILE#vllm-}"
-          wheel_version="${wheel_version%%-cp*}"
-          git commit --allow-empty \
-            -m "${update_date} update XPU nightly: ${wheel_version}" \
+          git commit \
+            -m "${update_date} update XPU wheel: ${WHEEL_VERSION}" \
             -m "Wheel: ${WHEEL_FILE}" \
-            -m "Wheel URL: https://wheels.vllm.ai/${WHEEL_COMMIT}/${WHEEL_FILE}" \
+            -m "Wheel URL: ${WHEEL_URL}" \
             -m "Source commit: ${WHEEL_COMMIT}"
           git push origin "HEAD:refs/heads/${TEST_BRANCH}" \
             "--force-with-lease=refs/heads/${TEST_BRANCH}:${old_head}"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          new_head="$(git rev-parse HEAD)"
+          echo "commit=$new_head" >> "$GITHUB_OUTPUT"
           echo "updated=true" >> "$GITHUB_OUTPUT"
+          for attempt in {1..30}; do
+            pr_head="$(git ls-remote upstream refs/pull/67823/head | cut -f1)"
+            if [[ "$pr_head" == "$new_head" ]]; then
+              exit 0
+            fi
+            echo "Waiting for PR #67823 head to update ($attempt/30)"
+            sleep 10
+          done
+          echo "PR #67823 head did not update to $new_head" >&2
+          exit 1
 
       - name: Trigger full Intel CI
-        if: steps.update.outputs.updated == 'true' || inputs.run_full_ci == true
+        if: steps.update.outputs.updated == 'true' || inputs.run_full_ci == true || inputs.release_version != ''
         env:
           BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
           TEST_COMMIT: ${{ steps.update.outputs.commit }}
           WHEEL_FILE: ${{ steps.wheel.outputs.wheel }}
+          WHEEL_URL: ${{ steps.wheel.outputs.url }}
+          WHEEL_VERSION: ${{ steps.wheel.outputs.version }}
+          WHEEL_COMMIT: ${{ steps.wheel.outputs.commit }}
+          RELEASE_VERSION: ${{ steps.wheel.outputs.release }}
         run: |
           python - <<'PY'
           import json
@@ -159,16 +200,22 @@ jobs:
           from zoneinfo import ZoneInfo
 
           validation_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y.%m.%d")
+          wheel_kind = f"Release {os.environ['RELEASE_VERSION']}" if os.environ.get("RELEASE_VERSION") else "Nightly"
           payload = {
               "commit": os.environ["TEST_COMMIT"],
               "branch": f"wendyliu235:{os.environ['TEST_BRANCH']}",
-              "message": f"Nightly-vllm whl validation {validation_date}\n\nPR #67823\nWheel: {os.environ['WHEEL_FILE']}",
+              "message": f"{wheel_kind}-vllm whl validation {validation_date}\n\nPR #67823\nWheel: {os.environ['WHEEL_FILE']}",
               "pull_request_id": 67823,
               "pull_request_base_branch": "main",
               "pull_request_repository": "https://github.com/wendyliu235/vllm-public.git",
               "pull_request_labels": ["ci/build", "intel-gpu"],
               "ignore_pipeline_branch_filters": True,
-              "env": {"NIGHTLY": "1", "RUN_ALL": "1"},
+                "env": {
+                  "NIGHTLY": "1", "RUN_ALL": "1",
+                  "VLLM_WHEEL_URL": os.environ["WHEEL_URL"],
+                  "VLLM_WHEEL_VERSION": os.environ["WHEEL_VERSION"],
+                  "VLLM_WHEEL_COMMIT": os.environ["WHEEL_COMMIT"],
+                },
           }
           request = Request(
               "https://api.buildkite.com/v2/organizations/vllm/pipelines/intel-ci/builds",
