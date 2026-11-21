@@ -169,14 +169,14 @@ jobs:
           echo "commit=$new_head" >> "$GITHUB_OUTPUT"
           echo "updated=true" >> "$GITHUB_OUTPUT"
           for attempt in {1..30}; do
-            pr_head="$(git ls-remote upstream refs/pull/67823/head | cut -f1)"
+            pr_head="$(git ls-remote upstream refs/pull/68816/head | cut -f1)"
             if [[ "$pr_head" == "$new_head" ]]; then
               exit 0
             fi
-            echo "Waiting for PR #67823 head to update ($attempt/30)"
+            echo "Waiting for PR #68816 head to update ($attempt/30)"
             sleep 10
           done
-          echo "PR #67823 head did not update to $new_head" >&2
+          echo "PR #68816 head did not update to $new_head" >&2
           exit 1
 
       - name: Trigger full Intel CI
@@ -204,8 +204,8 @@ jobs:
           payload = {
               "commit": os.environ["TEST_COMMIT"],
               "branch": f"wendyliu235:{os.environ['TEST_BRANCH']}",
-              "message": f"{wheel_kind}-vllm whl validation {validation_date}\n\nPR #67823\nWheel: {os.environ['WHEEL_FILE']}",
-              "pull_request_id": 67823,
+              "message": f"{wheel_kind}-vllm whl validation {validation_date}\n\nPR #68816\nWheel: {os.environ['WHEEL_FILE']}",
+              "pull_request_id": 68816,
               "pull_request_base_branch": "main",
               "pull_request_repository": "https://github.com/wendyliu235/vllm-public.git",
               "pull_request_labels": ["ci/build", "intel-gpu"],
